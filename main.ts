@@ -106,6 +106,7 @@ writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEX
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
     `token radar: model ${radar.model_version}: ${directCategories.length} categories priced from live-token comparables, ${marketPriorCategories} using the market prior\n` +
+    `token radar: comps fit n=${radar.comps.fit.n} slope ${radar.comps.fit.slope} intercept ${radar.comps.fit.intercept} R2 ${radar.comps.fit.r2}; out-of-sample ${radar.comps.test.held_out} held out, MedAPE ${radar.comps.test.med_ape.toFixed(1)}%, ${(radar.comps.test.hit_2x * 100).toFixed(1)}% within 2x\n` +
     `token radar: ${boardLine(board)}\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (3 files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n` +
     `token radar: deep links: ?token=none|live|all, ?category=<name>, ?chain=<name>, ?q=<text>, ?protocol=<slug>\n`,

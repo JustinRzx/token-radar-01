@@ -91,11 +91,52 @@ export const MODEL: ModelConstants = {
   ratio_cap: 20,
 };
 
-/** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-2-category-comparable';
+/**
+ * The farm plan's assumptions, stated as named constants and shown on the page. Every plan is netted to
+ * the dollar with them: the gas a step costs is paid, the capital a position needs is what the protocol's
+ * TVL tier calls for, and the value a farm can claim is the implied launch value times the share of
+ * supply a points programme typically hands to farmers.
+ */
+export const FARM = {
+  /** The share of supply a points programme hands each farmer: 0.05% of the launch value. A named
+   *  assumption, not a promise — the page states it and the sandbox lets a reader move it. */
+  allocation_share: 0.0005,
+  /** The capital tiers a position uses, by the protocol's own TVL: a deposit-sized stake, never a whale. */
+  capital_tiers: [100, 500, 2000],
+  capital_tier_floor_usd: [20_000_000, 200_000_000, 1_000_000_000],
+  /** The steps a plan runs: wallet, two category actions, weekly, hold, claim and log. */
+  step_count: 7,
+  /** The gas a step costs, in dollars: more on Ethereum, less on a cheap chain. */
+  eth_gas: 8,
+  cheap_gas: 1.5,
+  /** The holding window a plan is costed over, in days. */
+  hold_days: 45,
+};
 
-/** How many pre-token protocols below the watchlist floor the early radar carries, by TVL. */
-export const EARLY_ROWS = 160;
+/** The model's version label: the dashboard names it and the rules quote it. */
+export const MODEL_VERSION = 'radar-3-fitted-comps';
+
+/** The fraction of live-token protocols that are held out for the comps test: one in five, by slug hash. */
+export const HOLDOUT_MODULUS = 5;
+
+/** The fit's form: log10(mcap) = intercept + slope x log10(TVL), over the snapshot's live-token peers. */
+export interface CompsFit {
+  slope: number;
+  intercept: number;
+  r2: number;
+  n: number;
+  median_ratio: number;
+}
+
+/** The blind test of the comps fit: fit without the held-out fifth, predict it, score the misses. */
+export interface CompsTest {
+  held_out: number;
+  train: number;
+  med_ape: number;
+  hit_2x: number;
+  slope: number;
+  intercept: number;
+}
 
 /** The live-token view's cap, by market cap. Set above the sealed snapshot's live side so every
  *  token-bearing protocol can be shown while still bounding a much larger future snapshot. */
@@ -168,6 +209,18 @@ export interface RadarRow {
   gecko_id: string | null;
   model: ValueBreakdown & { age_days: number | null };
   farm_steps: string[];
+  farm: FarmPlan;
+}
+
+/** A farm plan netted to the dollar: what it costs, what it needs, what it is expected to pay. */
+export interface FarmPlan {
+  steps: number;
+  gas_usd: number;
+  time_days: number;
+  capital_usd: number;
+  allocation_share: number;
+  gross_usd: number;
+  net_usd: number;
 }
 
 /** A live-token protocol: it already trades, so the page shows the market's own value, not a model's. */
@@ -200,6 +253,8 @@ export interface RadarData {
   rows: RadarRow[];
   live: LiveRow[];
   multiples: CategoryMultiple[];
+  comps: { fit: CompsFit; test: CompsTest };
+  farm: typeof FARM;
 }
 
 /** Why the snapshot is not one this model can score. */
@@ -217,6 +272,7 @@ function finite(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
+const round2 = (n: number): number => Math.round(n * 1e2) / 1e2;
 const round4 = (n: number): number => Math.round(n * 1e4) / 1e4;
 const round6 = (n: number): number => Math.round(n * 1e6) / 1e6;
 const clamp = (n: number, low: number, high: number): number => Math.min(high, Math.max(low, n));
@@ -312,6 +368,98 @@ export function categoryMultiples(snapshot: Snapshot, model: ModelConstants = MO
   return out;
 }
 
+/** FNV-1a over a slug, unsigned: the deterministic hash the holdout split is a pure function of. */
+export function slugHash(slug: string): number {
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < slug.length; i++) {
+    h ^= slug.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return h >>> 0;
+}
+
+/** Whether a live-token protocol is held out of the fit: one slug in HOLDOUT_MODULUS of the set. */
+export function isHoldout(slug: string): boolean {
+  return slugHash(slug) % HOLDOUT_MODULUS === 0;
+}
+
+/** The live-token peers a comps fit may use: not pre-token, not a CEX, not a versioned pool, with both
+ *  a TVL and a market cap. */
+function compsPeers(snapshot: Snapshot): SnapshotProtocol[] {
+  return snapshot.protocols.filter(
+    (p) => !isPreToken(p) && p.category !== 'CEX' && !VERSIONED.test(p.name) && (p.mcap_usd ?? 0) > 0 && p.tvl_usd > 0,
+  );
+}
+
+/**
+ * Fit the live-token comparables: a least-squares line through the snapshot's own peers,
+ *   log10(mcap) = intercept + slope x log10(TVL),
+ * with R^2 on the same points. The slope is the elasticity of market cap to TVL; the intercept is the
+ * price of the first log10-dollar of TVL. Returns null when there are fewer than two peers or no spread.
+ */
+export function fitComps(peers: SnapshotProtocol[]): CompsFit | null {
+  const n = peers.length;
+  if (n < 2) return null;
+  let sx = 0;
+  let sy = 0;
+  for (const p of peers) {
+    sx += Math.log10(p.tvl_usd);
+    sy += Math.log10(p.mcap_usd as number);
+  }
+  const mx = sx / n;
+  const my = sy / n;
+  let sxx = 0;
+  let sxy = 0;
+  let syy = 0;
+  for (const p of peers) {
+    const dx = Math.log10(p.tvl_usd) - mx;
+    const dy = Math.log10(p.mcap_usd as number) - my;
+    sxx += dx * dx;
+    sxy += dx * dy;
+    syy += dy * dy;
+  }
+  if (sxx === 0 || syy === 0) return null;
+  const slope = sxy / sxx;
+  const intercept = my - slope * mx;
+  const r2 = (sxy * sxy) / (sxx * syy);
+  const ratios = peers.map((p) => (p.mcap_usd as number) / p.tvl_usd).sort((a, b) => a - b);
+  const mid = Math.floor(ratios.length / 2);
+  const medianRatio = ratios.length % 2 === 1 ? ratios[mid]! : (ratios[mid - 1]! + ratios[mid]!) / 2;
+  return { slope: round6(slope), intercept: round6(intercept), r2: round6(r2), n, median_ratio: round6(medianRatio) };
+}
+
+/**
+ * Test the comps fit blind: hold out the deterministic fifth of the live peers (by slug hash), fit on the
+ * rest, predict each held-out market cap from its TVL alone, and score the misses. Reports the out-of-
+ * sample median absolute percentage error and the share of held-out protocols the prediction lands within
+ * 2x of the truth. The split is a pure function of the slug, so two runs write the same numbers.
+ */
+export function testComps(peers: SnapshotProtocol[]): CompsTest | null {
+  const train = peers.filter((p) => !isHoldout(p.slug));
+  const held = peers.filter((p) => isHoldout(p.slug));
+  const fit = fitComps(train);
+  if (fit === null || held.length === 0) return null;
+  const apes: number[] = [];
+  let hits = 0;
+  for (const p of held) {
+    const predicted = Math.pow(10, fit.intercept + fit.slope * Math.log10(p.tvl_usd));
+    const truth = p.mcap_usd as number;
+    apes.push((Math.abs(predicted - truth) / truth) * 100);
+    if (Math.max(predicted / truth, truth / predicted) <= 2) hits++;
+  }
+  apes.sort((a, b) => a - b);
+  const mid = Math.floor(apes.length / 2);
+  const medApe = apes.length % 2 === 1 ? apes[mid]! : (apes[mid - 1]! + apes[mid]!) / 2;
+  return {
+    held_out: held.length,
+    train: train.length,
+    med_ape: round6(medApe),
+    hit_2x: round6(hits / held.length),
+    slope: fit.slope,
+    intercept: fit.intercept,
+  };
+}
+
 /**
  * One protocol's implied value. The formula, in the order the page shows it:
  *
@@ -364,13 +512,12 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     const p = index.get(slug);
     if (p !== undefined) chosen.set(slug, p);
   }
-  // The early radar: pre-token protocols below the watchlist floor, by TVL, capped. Never a replacement
-  // for a watchlist row: a chosen protocol stays chosen.
-  const early = snapshot.protocols
-    .filter((p) => !chosen.has(p.slug) && isRankable(p) && p.tvl_usd < snapshot.floor_usd)
-    .sort((a, b) => b.tvl_usd - a.tvl_usd || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0))
-    .slice(0, EARLY_ROWS);
-  for (const p of early) chosen.set(p.slug, p);
+  // Every pre-token protocol the snapshot records, ranked: the watchlist is the floor, never the ceiling.
+  // A pre-token protocol the watchlist misses joins the board on its own figures, however small its TVL,
+  // so the radar covers all of the 342, not only the ones above the floor.
+  for (const p of snapshot.protocols) {
+    if (isRankable(p) && !chosen.has(p.slug)) chosen.set(p.slug, p);
+  }
 
   const scored = [...chosen.values()].map((p) => {
     const category = multiples.get(p.category ?? 'Other')!;
@@ -378,7 +525,9 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     return { p, category, value };
   });
   scored.sort((a, b) => b.value.implied - a.value.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
-  return scored.map((s, i) => ({
+  return scored.map((s, i) => {
+    const steps = farmSteps(s.p, s.value.age);
+    return {
     rank: i + 1,
     slug: s.p.slug,
     name: s.p.name,
@@ -404,8 +553,53 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
       maturity_multiplier: s.value.maturityMult,
       age_days: s.value.age,
     },
-    farm_steps: farmSteps(s.p, s.value.age).map(stepText),
-  }));
+    farm_steps: steps.map(stepText),
+    farm: farmPlan(s.p, steps, s.value.implied),
+    };
+  });
+}
+
+/** The gas a chain's plan pays a step, in dollars, quotes excluded: the same tiering the steps state. */
+function gasPerStep(chain: string): number {
+  const c = chain.toLowerCase();
+  if (c.includes('ethereum') || c === 'mainnet') return FARM.eth_gas;
+  if (c.includes('base') || c.includes('arbitrum') || c.includes('optimism') || c.includes('polygon')) return 2;
+  if (c.includes('solana') || c.includes('sui') || c.includes('monad')) return 0.5;
+  return 3;
+}
+
+/** The days a plan's steps span: the hold window plus one pass of the maintenance steps. */
+function planDays(steps: FarmStep[]): number {
+  let days = 0;
+  for (const s of steps) {
+    const m = /(\d+)\s*days?/.exec(s.time);
+    if (m !== null) days = Math.max(days, Number(m[1]));
+    if (/a week/.test(s.time)) days = Math.max(days, 7);
+  }
+  return Math.max(days, FARM.hold_days);
+}
+
+/**
+ * Net one protocol's plan to the dollar: the gas every step pays, the days it runs, the capital the tier
+ * needs, and the value it is expected to claim — the launch value times the FARM allocation share, no
+ * more than the launch value itself — less the gas. `net_usd` is the plan's expected value, stated as an
+ * estimate, and the whole assumption set is carried on the row so the page can name it.
+ */
+export function farmPlan(p: SnapshotProtocol, steps: FarmStep[], implied: number): FarmPlan {
+  const chain = chainOf(p);
+  const gas = round2(steps.length * gasPerStep(chain));
+  const capital = capitalFor(p);
+  const share = FARM.allocation_share;
+  const gross = Math.round(implied * share);
+  return {
+    steps: steps.length,
+    gas_usd: gas,
+    time_days: planDays(steps),
+    capital_usd: capital,
+    allocation_share: share,
+    gross_usd: gross,
+    net_usd: Math.round(gross - gas),
+  };
 }
 
 /** A step as one string: its action, then its cost and time, within the gate's 20..600 characters. */
@@ -421,12 +615,13 @@ function chainOf(p: SnapshotProtocol): string {
   return p.chains.length > 0 ? p.chains[0]! : 'its main chain';
 }
 
-/** How much capital one farm position needs, from the protocol's own TVL. */
-function capitalFor(p: SnapshotProtocol): number {
-  if (p.tvl_usd >= 5_000_000_000) return 250;
-  if (p.tvl_usd >= 1_000_000_000) return 150;
-  if (p.tvl_usd >= 100_000_000) return 100;
-  return 50;
+/** How much capital one farm position needs: the FARM tier the protocol's own TVL reaches. */
+export function capitalFor(p: SnapshotProtocol): number {
+  let tier = FARM.capital_tiers[0]!;
+  for (let i = 0; i < FARM.capital_tiers.length; i++) {
+    if (p.tvl_usd >= FARM.capital_tier_floor_usd[i]!) tier = FARM.capital_tiers[i]!;
+  }
+  return tier;
 }
 
 /** How long to hold, from the protocol's age: younger protocols get a longer qualifying window. */
@@ -754,6 +949,7 @@ export function radarRow(row: BoardRow): RadarRow {
     gecko_id: row.gecko_id,
     model: row.model,
     farm_steps: row.farm_steps,
+    farm: row.farm,
   };
 }
 
@@ -763,6 +959,10 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
   const live = liveRows(snapshot);
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
   const multiples = [...categoryMultiples(snapshot, model).values()].sort((a, b) => (a.category < b.category ? -1 : a.category > b.category ? 1 : 0));
+  const peers = compsPeers(snapshot);
+  const fit = fitComps(peers);
+  const test = testComps(peers);
+  if (fit === null || test === null) throw new SnapshotError('snapshot.json holds too few live-token comparables to fit and test the comps curve');
   const radar: RadarData = {
     as_of: snapshot.as_of,
     source: snapshot.source,
@@ -776,6 +976,8 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     rows: board.map(radarRow),
     live,
     multiples,
+    comps: { fit, test },
+    farm: FARM,
   };
   return { board, radar };
 }

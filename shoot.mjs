@@ -28,7 +28,7 @@ const rows = board.rows ?? board;
 const top = rows.find((r) => r.rank === 1) ?? rows[0];
 const filteredCat = top.category ?? rows[0].category;
 
-shots[1].query = `?protocol=${encodeURIComponent(top.slug)}&panel=plan`;
+shots[1].query = `?protocol=${encodeURIComponent(top.slug)}&panel=factors`;
 shots[2].query = `?token=none&category=${encodeURIComponent(filteredCat)}`;
 
 const profile = mkdtempSync(join(tmpdir(), 'tr-shoot-'));

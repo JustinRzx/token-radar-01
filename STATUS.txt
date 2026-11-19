@@ -1,0 +1,8 @@
+competition  token-radar-01 (make.fun)
+submission   01a1f19c-ce6b-775f-b93d-b434da21f518
+claim code   AF-M824F-X7EDA-6AD70-TVCMH
+repo         https://github.com/JustinRzx/token-radar-01
+commit       63aef40e8b2d52020a4e5a2a5a89131bff02ee25
+stage        scored, round 2, judge_state=rated, outcome pending
+entries close 2026-12-14T10:00Z   result due 2026-12-28T22:10Z
+escrow       HD6as9UHeN5RwtzgmWmBWbdTaYtTXGNjfXag3Rgby8Rf (mainnet, open)
